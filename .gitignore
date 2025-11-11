@@ -1,0 +1,22 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.env
+
+# Datasets
+/data/celeba/
+
+# Model checkpoints
+checkpoints/
+
+# Logs
+logs/
+
+# Results
+results/
+
+# OS files
+.DS_Store
