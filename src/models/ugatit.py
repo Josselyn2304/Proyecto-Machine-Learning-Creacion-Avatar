@@ -1,77 +1,89 @@
-import tensorflow as tf
-from tensorflow.keras import layers, models, initializers
+import torch
+import torch.nn as nn
 
-class AdaLIN(layers.Layer):
-    def __init__(self, **kwargs):
-        super(AdaLIN, self).__init__(**kwargs)
+class AdaptiveInstanceLayerNorm(nn.Module):
+    def __init__(self, num_features, style_dim):
+        super(AdaptiveInstanceLayerNorm, self).__init__()
+        self.instance_norm = nn.InstanceNorm2d(num_features, affine=False)
+        self.style_scale = nn.Linear(style_dim, num_features)
+        self.style_bias = nn.Linear(style_dim, num_features)
 
-    def call(self, inputs):
-        x, y = inputs
-        
-        mean = tf.reduce_mean(y, axis=(1, 2), keepdims=True)
-        std = tf.math.reduce_std(y, axis=(1, 2), keepdims=True)
+    def forward(self, x, style):
+        normalized = self.instance_norm(x)
+        scale = self.style_scale(style).unsqueeze(2).unsqueeze(3)
+        bias = self.style_bias(style).unsqueeze(2).unsqueeze(3)
+        return normalized * (1 + scale) + bias
 
-        out = (x - mean) / (std + 1e-6)
-        return out
+class ResnetBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ResnetBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.instancenorm1 = nn.InstanceNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.instancenorm2 = nn.InstanceNorm2d(out_channels)
 
-class ResBlock(layers.Layer):
-    def __init__(self, filters, use_bias=True, **kwargs):
-        super(ResBlock, self).__init__(**kwargs)
-        self.conv1 = layers.Conv2D(filters, (3, 3), padding='same', use_bias=use_bias)
-        self.conv2 = layers.Conv2D(filters, (3, 3), padding='same', use_bias=use_bias)
-        self.adalin = AdaLIN()
-
-    def call(self, inputs):
-        x = self.conv1(inputs)
-        x = self.adalin([x, inputs])
+    def forward(self, x):
+        skip = x
+        x = self.conv1(x)
+        x = self.instancenorm1(x)
+        x = torch.relu(x)
         x = self.conv2(x)
-        x = x + inputs
-        return x
+        x = self.instancenorm2(x)
+        return x + skip
 
-class Generator(models.Model):
-    def __init__(self):
-        super(Generator, self).__init__()
-        self.model = models.Sequential([
-            layers.Input(shape=(256, 256, 3)),
-            
-            ResBlock(64),
-            layers.Conv2DTranspose(128, (4, 4), strides=2, padding='same'),
-            ResBlock(128),
-            layers.Conv2DTranspose(256, (4, 4), strides=2, padding='same'),
-            ResBlock(256),
-            layers.Conv2D(3, (7, 7), padding='same', activation='tanh')
-        ])
+class ResnetGenerator(nn.Module):
+    def __init__(self, input_dim, output_dim, ngf):
+        super(ResnetGenerator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(input_dim, ngf, kernel_size=7, padding=3),
+            nn.InstanceNorm2d(ngf),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(ngf, ngf * 2, kernel_size=3, stride=2, padding=1),
+            nn.InstanceNorm2d(ngf * 2),
+            nn.ReLU(inplace=True),
+            *[ResnetBlock(ngf * 2, ngf * 2) for _ in range(8)],
+            nn.ConvTranspose2d(ngf * 2, ngf, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.InstanceNorm2d(ngf),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(ngf, output_dim, kernel_size=7, padding=3),
+            nn.Tanh()
+        )
 
-    def call(self, inputs):
-        return self.model(inputs)
+    def forward(self, x):
+        return self.model(x)
 
-class Discriminator(models.Model):
-    def __init__(self):
+class Discriminator(nn.Module):
+    def __init__(self, input_dim, ndf):
         super(Discriminator, self).__init__()
-        self.model = models.Sequential([
-            layers.Input(shape=(256, 256, 3)),
-            layers.Conv2D(64, (4, 4), strides=2, padding='same'),
-            layers.LeakyReLU(0.2),
-            layers.Conv2D(128, (4, 4), strides=2, padding='same'),
-            layers.LeakyReLU(0.2),
-            layers.Conv2D(256, (4, 4), strides=2, padding='same'),
-            layers.LeakyReLU(0.2),
-            layers.Conv2D(512, (4, 4), strides=2, padding='same'),
-            layers.LeakyReLU(0.2),
-            layers.Flatten(),
-            layers.Dense(1)
-        ])
+        self.model = nn.Sequential(
+            nn.Conv2d(input_dim, ndf, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf, ndf * 2, kernel_size=4, stride=2, padding=1),
+            nn.InstanceNorm2d(ndf * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf * 2, 1, kernel_size=4, stride=1, padding=1)
+        )
 
-    def call(self, inputs):
-        return self.model(inputs)
+    def forward(self, x):
+        return self.model(x)
 
-class UGATIT:
-    def __init__(self):
-        self.generator = Generator()
-        self.discriminator = Discriminator()
+class UGATIT(nn.Module):
+    def __init__(self, style_dim):
+        super(UGATIT, self).__init__()
+        self.genA2B = ResnetGenerator(3, 3, 64)
+        self.genB2A = ResnetGenerator(3, 3, 64)
+        self.disGA = Discriminator(3, 64)
+        self.disGB = Discriminator(3, 64)
+        self.disLA = Discriminator(3, 64)
+        self.disLB = Discriminator(3, 64)
+        self.style_dim = style_dim
 
-    def train_step(self, real_images):
-        # Training logic goes here
-        pass
+    def to(self, device):
+        super().to(device)
+        for module in [self.genA2B, self.genB2A, self.disGA, self.disGB, self.disLA, self.disLB]:
+            module.to(device)
 
-# You can add methods for defining loss, compiling model, etc. later.
+    def parameters(self):
+        return list(self.genA2B.parameters()) + list(self.genB2A.parameters()) + \
+               list(self.disGA.parameters()) + list(self.disGB.parameters()) + \
+               list(self.disLA.parameters()) + list(self.disLB.parameters())
