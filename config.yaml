@@ -1,0 +1,66 @@
+model:
+  name: "UGATIT"
+  version: "1.0"
+
+parameters:
+  learning_rate: 0.0001
+  batch_size: 4
+  image_size: 256
+  mixed_precision: true
+  model_type: "light"
+  num_residual_blocks: 4
+
+training:
+  num_epochs: 50
+  training_speed: "3-6 hours"
+  optimizer:
+    type: "Adam"
+    weight_decay: 0.00001
+  checkpoint:
+    save_frequency: "10 epochs"
+    directory: "./checkpoints/"
+
+dataset:
+  name: "Custom Dataset"
+  path: "./data/"
+  augmentations:
+    - "horizontal_flip"
+    - "random_crop"
+
+gpu:
+  usage:
+    enable: true
+    device: "0"
+    memory_growth: true
+
+logging:
+  log_dir: "./logs/"
+  log_frequency: "every epoch"
+
+inference:
+  enabled: true
+  save_output: true
+
+optimization:
+  scheduler:
+    type: "CosineAnnealing"
+    T_max: 50
+    eta_min: 0.00001
+
+architecture:
+  layers:
+    - "conv"
+    - "residual_block"
+    - "upsample"
+    - "conv_transpose"
+  output_activation: "tanh"
+
+evaluation:
+  metrics:
+    - "PSNR"
+    - "SSIM"
+    - "FID"
+
+reproducibility:
+  seed: 42
+  debug_mode: false
